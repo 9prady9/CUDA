@@ -31,6 +31,16 @@ __host__ int ciel(float value)
   return ((int)value + (mantissa==0 ? 0 : 1));
 }
 
+/**
+ * First lanuch of this kernel is such that number is blocks equals number of rows
+ * Each row is then divided by multiple threads
+ * Thus, the variables 'tid' , 'PerThreadLimit' and 'Block_ColLimit' are computed in below device function
+ * max_offset variable is essentially used to prevent off range access in memory.
+ * Once each thread knows the range of coloumns it should process in a given row. It computes min and max locally
+ * and places it in shared memory space 'threadResults[]'. This array is later used for running
+ * reduction process on the local minimums and local maximums to get row wise minimum and maximum
+ * Second call of the kernel is made with row wise mins and maxs to get a global minimum and global maximum
+ */
 __global__ void MinMax(Matrix mat, float* localMin, float* localMax, int ColsPerThread)
 {
   extern __shared__ float threadResults[];
@@ -92,6 +102,10 @@ __global__ void MinMax(Matrix mat, float* localMin, float* localMax, int ColsPer
   }
 }
 
+/**
+ * Program requires two numerical inputs: Matrix dimensions
+ * Maximum dimension allowed in any direction is MAX_BLKS = 65535
+ */
 int main(int argc, char* argv[])
 {
  if(argc == 3)
@@ -122,10 +136,12 @@ int main(int argc, char* argv[])
   cudaEvent_t	startT1, startT2, startT3, startT4, stopT1, stopT2, stopT3, stopT4, startl, stopl;
   float 		timeT1, timeT2, timeT3, timeT4, timeminmax1, timeminmax2, host_min, host_max;
 
-  /* Check whether Row Dimension < Maximum # of blocks allowed:
+  /**
+   * Check whether Row Dimension < Maximum # of blocks allowed:
    * if YES then we launch blocks equal to number of rows
    * if NO then we take dividend of RowDim/MAX_BlOCKS as number 
-   * and launch MAX_BLOCKS blocks*/
+   * and launch MAX_BLOCKS blocks
+   */
   int blocksPerGrid = RowDim;
   int half = ColDim/2 + ( ColDim%2==0 ? 0 : 1 );
   int ColsPerThread = ( half/MAX_THRDS_P_BLK==0 ? 2 : ciel((float)ColDim/MAX_THRDS_P_BLK) );

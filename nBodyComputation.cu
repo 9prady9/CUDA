@@ -5,8 +5,7 @@
 #include <cuda_runtime.h>
 #include "cuPrintf.cu"
 
-#define MAX_BODY 512
-#define MAX_BLKS 65535
+#define MAX_BLKS 65537
 #define MAX_THRDS_P_BLK 512
 
 struct Vector
@@ -30,56 +29,58 @@ __host__ int ciel(float value)
   return ((int)value + (mantissa==0 ? 0 : 1));
 }
 
-__global__ void forceComp(Vector *positions, int bodyCount, float* resultantForce) //, int bodiesPerThread)
+
+/**
+ * Kernel is launched with as many blocks as bodies. Not an optimal strategy but first iteration.
+ * In each block, if number of threads is a power of two which is computed based on number of bodies given
+ * Hence, the binary reduction in kernel is much simpler since thread load is power of two.
+ * Each thread computes forces of <bodiesPerThread> bodies on itself, followed by a reduction to compute overall force.
+ */
+__global__ void forceComp(Vector *positions, int bodyCount, float* resultantForce, int bodiesPerThread)
 {
   extern __shared__ float perBlockCache[];
-  //int tid = threadIdx.x*bodiesPerThread;
-  //int Limit = tid + bodiesPerThread;
-  int reduceDim = blockDim.x;
-  int i = reduceDim/2;
+  int tid = threadIdx.x*bodiesPerThread;
+  int Limit = tid + bodiesPerThread;
   
-  if(threadIdx.x < bodyCount)//( tid < bodyCount )
+  if( tid < bodyCount )
   {
     perBlockCache[threadIdx.x] = 0.0;
-    //while( tid < Limit )
+    while( tid < Limit )
     {
-      if( blockIdx.x != threadIdx.x )
-        perBlockCache[threadIdx.x] += positions[blockIdx.x].d_influenceBy(positions[threadIdx.x]);
-      //tid++;
+      if( blockIdx.x != tid )
+        perBlockCache[threadIdx.x] += positions[blockIdx.x].d_influenceBy(positions[tid]);
+      tid++;
     }
     __syncthreads();
   
     /* now do reduction by addition for the resultant
      * force on body with Id = blockIdx.x */
-    while(i!=0)
+    int reduceDim = blockDim.x/2;
+    while(reduceDim>0)
     {
-      if( threadIdx.x < i )
-      {
-        if( reduceDim%2 != 0 )
-        {
-          reduceDim--;
-          if( threadIdx.x == 0 )
-            perBlockCache[threadIdx.x] += perBlockCache[threadIdx.x+reduceDim];
-        }
-        perBlockCache[threadIdx.x] += perBlockCache[threadIdx.x+i];
-      }
+      if( threadIdx.x < reduceDim )
+		perBlockCache[threadIdx.x] += perBlockCache[threadIdx.x+reduceDim];
       __syncthreads();
       reduceDim /= 2;
-      i /= 2;
     }
     if(threadIdx.x == 0)
       resultantForce[blockIdx.x] = perBlockCache[0];
   }
 }
 
+/**
+ * Program requires a numerical input i.e. the number
+ * of bodies participating in the n-body simulation
+ * This number should be less than MAX_BLKS = 65537
+ */
 int main(int argc, char* argv[])
 {
  if(argc == 2)
  {
   int host_bodyCount = atoi(argv[1]);
-  if( host_bodyCount > MAX_BODY )
+  if( host_bodyCount > MAX_BLKS )
   {
-    printf("Please give a number N < %d\n", MAX_BODY);
+    printf("Please give a number N < %d\n", MAX_BLKS);
     return -1;
   }
   
@@ -95,9 +96,10 @@ int main(int argc, char* argv[])
   
   size_t 	size 			= host_bodyCount * sizeof(Vector);
   int 		blocksPerGrid 	= host_bodyCount;
-  int 		threadsPerBlock = host_bodyCount;
-  int 		threadsPerBlock = ( host_bodyCount < MAX_THRDS_P_BLK ? host_bodyCount : MAX_THRDS_P_BLK );
-  int 		bodiesPerThread = ciel((float)host_bodyCount/MAX_THRDS_P_BLK);
+  int thrdCntHold			= MAX_THRDS_P_BLK;
+  for(int i=1; host_bodyCount<thrdCntHold && thrdCntHold>2 ; ++i) thrdCntHold >>= 1;
+  int 		threadsPerBlock	= thrdCntHold;
+  int 		bodiesPerThread = ciel((float)host_bodyCount/threadsPerBlock);
   res_size 					= threadsPerBlock*sizeof(float);
 
   printf("Blocks per Grid: %d\nThreads per Block: %d\n", blocksPerGrid, threadsPerBlock);
@@ -128,12 +130,12 @@ int main(int argc, char* argv[])
    
   cudaEventRecord( startForceComp, 0 );
   cudaPrintfInit();
-  forceComp<<<blocksPerGrid, threadsPerBlock, res_size>>>(dev_positions, host_bodyCount, dev_resultantForce); //, bodiesPerThread);
+  forceComp<<<blocksPerGrid, threadsPerBlock, res_size>>>(dev_positions, host_bodyCount, dev_resultantForce, bodiesPerThread);
   cudaEventRecord( stopForceComp, 0 );
   cudaPrintfDisplay(stdout, true);
   cudaPrintfEnd();
 
-   /* copt result from device to host */
+   /* Copy result from device to host */
   cudaMemcpy( host_resultantForce, dev_resultantForce, res_size, cudaMemcpyDeviceToHost );
 
   cudaEventRecord( stop, 0 );
